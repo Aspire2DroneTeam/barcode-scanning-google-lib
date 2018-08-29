@@ -5,64 +5,48 @@ import android.graphics.Bitmap;
 import android.graphics.SurfaceTexture;
 import android.media.MediaActionSound;
 import android.os.Bundle;
-import android.os.Handler;
 import android.util.Log;
 import android.util.SparseArray;
-import android.view.Gravity;
 import android.view.TextureView;
 import android.view.View;
 import android.view.View.OnClickListener;
 import android.view.TextureView.SurfaceTextureListener;
-import android.widget.Button;
-import android.widget.CompoundButton;
-import android.widget.TextView;
 import android.widget.Toast;
-import android.widget.ToggleButton;
 
-import com.dji.FPVDemo.FPVDemoApplication;
-import com.dji.FPVDemo.R;
-import com.dji.scan.qr.camera.CameraSettings;
-import com.google.android.gms.vision.Detector;
 import com.google.android.gms.vision.Frame;
 import com.google.android.gms.vision.barcode.Barcode;
 import com.google.android.gms.vision.barcode.BarcodeDetector;
 import com.google.gson.Gson;
 
 import java.util.ArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-import dji.common.camera.FocusState;
+import dji.common.camera.FocusAssistantSettings;
 import dji.common.camera.SettingsDefinitions;
-import dji.common.camera.SystemState;
 import dji.common.error.DJIError;
 import dji.common.product.Model;
-import dji.common.useraccount.UserAccountState;
 import dji.common.util.CommonCallbacks;
-import dji.keysdk.CameraKey;
 import dji.sdk.base.BaseProduct;
 import dji.sdk.camera.Camera;
 import dji.sdk.camera.VideoFeeder;
 import dji.sdk.codec.DJICodecManager;
 import dji.sdk.products.Aircraft;
-import dji.sdk.useraccount.UserAccountManager;
 
 public class MainActivity extends Activity implements SurfaceTextureListener,OnClickListener{
 
     private static final String TAG = MainActivity.class.getName();
     protected VideoFeeder.VideoDataCallback mReceivedVideoDataCallBack = null;
-
-
-    // Codec for video live view
     protected DJICodecManager mCodecManager = null;
-
     protected TextureView mVideoSurface = null;
+    protected Frame frame;
+    private ExecutorService pool;
+    int SHUTTER_CLICK;
 
+    Camera camera = new Aircraft(null).getCamera();
     BarcodeDetector barcodeDetector;
     ArrayList<String> listOfBarcodes = new ArrayList<>();
     MediaActionSound sound = new MediaActionSound();
-    int SHUTTER_CLICK;
-
-    protected Frame frame;
-    Camera camera = new Aircraft(null).getCamera();
 
 
     @Override
@@ -70,10 +54,18 @@ public class MainActivity extends Activity implements SurfaceTextureListener,OnC
 
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        // Run BarcodeDetector and define formas
-        barcodeDetector = new BarcodeDetector.Builder(this).setBarcodeFormats(1).build();
-        // SEt up AUTO FOCUS
-        camera.setFocusMode(SettingsDefinitions.FocusMode.AFC, null);
+
+        // Run BarcodeDetector and define formats... 1 - CODE 128 only, 0 - ALL
+        barcodeDetector = new BarcodeDetector.Builder(this).setBarcodeFormats(0).build();
+
+        // SET UP AUTO FOCUS
+        camera.setFocusMode(SettingsDefinitions.FocusMode.AUTO, null);
+
+
+        camera.setAperture(SettingsDefinitions.Aperture.F_9, null);
+
+        // SET UP FOCUS ASSISTANT
+        camera.setFocusAssistantSettings(new FocusAssistantSettings(true, false), null);
 
         // CHECK AUTO FOCUS
         camera.getFocusMode(new CommonCallbacks.CompletionCallbackWith<SettingsDefinitions.FocusMode>() {
@@ -83,10 +75,22 @@ public class MainActivity extends Activity implements SurfaceTextureListener,OnC
             }
 
             @Override
+            public void onFailure(DJIError djiError) {}
+        });
+
+        // CHECK AUTO FOCUS
+        camera.getFocusAssistantSettings(new CommonCallbacks.CompletionCallbackWithTwoParam<Boolean, Boolean>() {
+            @Override
+            public void onSuccess(Boolean aBoolean, Boolean aBoolean2) {
+                showToast(aBoolean + " ," + aBoolean2);
+            }
+
+            @Override
             public void onFailure(DJIError djiError) {
 
             }
         });
+
 
         initUI();
 
@@ -100,6 +104,8 @@ public class MainActivity extends Activity implements SurfaceTextureListener,OnC
                 }
             }
         };
+
+        pool = Executors.newSingleThreadExecutor();
     }
 
     protected void onProductChange() {
@@ -145,12 +151,11 @@ public class MainActivity extends Activity implements SurfaceTextureListener,OnC
 
     private void initUI() {
         // init mVideoSurface
-        mVideoSurface = (TextureView)findViewById(R.id.video_previewer_surface);
+        mVideoSurface = findViewById(R.id.video_previewer_surface);
 
         if (null != mVideoSurface) {
             mVideoSurface.setSurfaceTextureListener(this);
         }
-
     }
 
     private void initPreviewer() {
@@ -183,9 +188,6 @@ public class MainActivity extends Activity implements SurfaceTextureListener,OnC
         if (mCodecManager == null) {
             mCodecManager = new DJICodecManager(this, surface, width, height);
         }
-
-
-
     }
 
     @Override
@@ -206,26 +208,10 @@ public class MainActivity extends Activity implements SurfaceTextureListener,OnC
 
     @Override
     public void onSurfaceTextureUpdated(SurfaceTexture surface) {
+        // GET FRAMES AND RUN BARCODE DETECTION
         Bitmap bitman = mVideoSurface.getBitmap();
         frame = new Frame.Builder().setBitmap(bitman).build();
-
-
-        recognizeBarcode(frame);
-    }
-
-    // BARCODE RECOGNITION + ARRAY
-    private void recognizeBarcode(Frame frame) {
-        SparseArray<Barcode> barcodes = barcodeDetector.detect(frame);
-
-        if (barcodes.size() > 0) {
-            for (int i = 0; i < barcodes.size(); i++) {
-                if (listOfBarcodes.indexOf(barcodes.valueAt(i).displayValue) == -1) {
-                    listOfBarcodes.add(barcodes.valueAt(i).displayValue);
-                    sound.play(SHUTTER_CLICK);
-                }
-            }
-        }
-        barcodes.clear();
+        pool.execute(new BarcodeDetectionTimber());
     }
 
     // SHOW TOAST
@@ -247,5 +233,30 @@ public class MainActivity extends Activity implements SurfaceTextureListener,OnC
 
     @Override
     public void onClick(View v) {
+    }
+
+    // EXECUTION SERVICE
+    private class BarcodeDetectionTimber implements Runnable {
+        public void recogniseBarcode(Frame frame) {
+            if (barcodeDetector != null) {
+                SparseArray<Barcode> barcodes = barcodeDetector.detect(frame);
+
+                if (barcodes.size() > 0) {
+                    System.out.println("Got a barcode!!!");
+                    for (int i = 0; i < barcodes.size(); i++) {
+                        if (listOfBarcodes.indexOf(barcodes.valueAt(i).displayValue) == -1) {
+                            listOfBarcodes.add(barcodes.valueAt(i).displayValue);
+                            sound.play(SHUTTER_CLICK);
+                            barcodes.clear();
+                        }
+                    }
+                }
+            }
+        }
+
+        @Override
+        public void run() {
+            this.recogniseBarcode(frame);
+        }
     }
 }
